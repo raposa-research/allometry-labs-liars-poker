@@ -1,0 +1,40 @@
+name: rnad-ppo-vtrace-8x10x3-ent-eta0
+
+# 8x10x3 (3-player, real scale), 2M steps.
+#
+# PPO + ENTROPY BONUS + NO REWARD TRANSFORM (eta=0).
+#
+# The sweep showed the entropy bonus is the whole story for keeping a PPO policy
+# off determinism: at 200k, ent alone matched ent+norm on both policy entropy
+# (H/ceiling 0.224 vs 0.245) and score (+0.013 vs +0.012), while normalization
+# alone was indistinguishable from nothing (0.061 vs 0.053). This run asks the
+# next question: with an entropy floor in place, is the R-NaD reward transform
+# needed AT ALL?
+#
+# eta=0 removes it entirely, leaving plain PPO + v-trace critic + entropy on the
+# raw (already zero-sum) game payoffs. opp_reg_coef / zero_sum_reg_scaling are
+# inert here -- every reg term is multiplied by eta.
+#
+# What this can and cannot be: with no anchor this is not a Nash-finding
+# algorithm -- self-play policy gradient can cycle rather than converge, and the
+# regularization is what R-NaD's fixed-point argument rests on. A good result
+# here means "the anchor was not what was holding the policy together"; it does
+# NOT mean the anchor is unnecessary for convergence. Judge it against the
+# entropy-bearing arms at matched steps, and check policy entropy directly
+# (src/policy_entropy.py) rather than trusting br/agent_score.
+#
+# READ PER-SEAT REWARDS (br/reward_p0/_p1/_p2), NOT br/agent_score: at 3 players
+# the mean cancels a collapsed seat against exploited ones. And note the
+# interleaved BR at this scale never broke even in 2M steps on any previous arm,
+# so the honest number needs the decoupled oppfeat BR on a checkpoint.
+# Branch rnad-ppo-vtrace.
+workdir: .
+resources: {accelerators: A100_SXM4:1, disk_size: 50, cpus: "16+", memory: "64+", reliability: 0.99}
+secrets: {AWS_ACCESS_KEY_ID: null, AWS_SECRET_ACCESS_KEY: null, AWS_ENDPOINT_URL: null, WANDB_API_KEY: null}
+setup: |
+  pip install uv
+  uv venv
+  uv pip install -r requirements.txt
+  uv pip install 'jax[cuda12]'
+run: |
+  WANDB_NAME=rnad-ppo-vtrace-8x10x3-ent-eta0 uv run python src/train_jax.py num_digits=10 hand_length=8 num_players=3 network_type=factored_mlp history_encoding=compact 'rnad_config.policy_network_layers=[512,512,512,256,256]' 'ppo_br_config.network_layers=[512,512,512,256,256]' rnad_config.policy_update=ppo rnad_config.advantage_estimator=vtrace rnad_config.eta_reward_transform=0.0 rnad_config.ppo_ent_coef=0.05 rnad_config.batch_size=256 ppo_br_config.batch_size=256 br_network_type=mlp 'br_layers=[512,512,512,256,256]' ppo_br_config.lr=1e-4 ppo_br_config.ent_coef=0.03 ppo_br_config.n_epochs=2 rnad_config.warmup_steps=2000 br_state_ratio=0 num_phases=20000 rnad_steps_per_phase=100 eval_every_phases=1000 br_collect_per_phase=40 br_eval_episodes=4096 checkpoint_every_phases=1000 +agent_score_window=3 br_reinit_every=0 rnad_config.trajectory_max=100 ppo_br_config.trajectory_max=100 save_dir=s3://<your-bucket>/checkpoints/rnad-ppo-vtrace-8x10x3-ent-eta0/

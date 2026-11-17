@@ -1,0 +1,181 @@
+num_digits: 3
+hand_length: 3
+num_players: 2
+# Action-space abstraction: cap the next bid's COUNT to within max_jump of the
+# current bid's count (base_count=1 for the opening bid). null = unrestricted
+# (byte-identical to the original game). Applies to the RNaD agent (and the
+# frozen-agent opponent inside the decoupled BR); the BR's OWN policy always
+# plays the full unrestricted game so it is an honest exploiter.
+max_jump: null
+# ACTION-SPACE SCALING PROBE. >1 appends (dummy_mult-1)*num_real_actions
+# "dummy" actions; each is legal whenever a real action is and resolves to a
+# UNIFORMLY RANDOM legal REAL action. A dummy is thus a mixture over existing
+# pure strategies, so the game's value and equilibrium set are unchanged and
+# ONLY |A| grows -- which isolates action-space size, the quantity NeuRD's
+# inv_mu = 1/mu(a_t) scales with. Use network_type=mlp with this: the factored
+# head builds per-action features from decode_bid and has no meaning for
+# dummies. 1 (default) = byte-identical to the original game.
+dummy_mult: 1
+# How a dummy RESOLVES (only used when dummy_mult > 1):
+#   random -- uniformly random legal REAL action. Inflates |A| but also makes
+#             the TRANSITION stochastic, a variance source independent of |A|,
+#             so it does not isolate action-space size.
+#   alias  -- DETERMINISTIC duplicate of one specific real action (legal iff
+#             its target is legal; applying it applies the target). |A_legal|
+#             scales by exactly dummy_mult and no stochasticity is added.
+#   lose   -- taking a dummy INSTANTLY LOSES for the taker. Deterministic,
+#             not a duplicate (so PPO's single-action signal is not split),
+#             strictly dominated (value preserved), and dummy mass is COSTLY.
+dummy_mode: random
+# Each phase = rnad_steps_per_phase RNaD steps + br_collect_per_phase PPO cycles.
+num_phases: 1000
+rnad_steps_per_phase: 100
+br_collect_per_phase: 10   # collect+update cycles per phase, per player
+br_eval_episodes: 4096
+br_state_pool_size: 10000  # max mid-game states to cache from BR rollouts (0 = disabled)
+br_state_ratio: 0.2        # fraction of RNaD batches starting from pool states
+br_reinit_every: 200         # reinitialize BR agent params every N phases (0 = disabled)
+eval_every_phases: 5
+checkpoint_every_phases: 20
+checkpoint_eval_episodes: 4096
+load_checkpoint: null
+save_dir: checkpoints
+
+# History representation: "sparse" (raw bid/challenge matrices) or "compact"
+# (dense structured summary, length 3*num_digits + num_players + 5).
+history_encoding: sparse
+
+# Network architecture: "mlp" or "transformer"
+network_type: mlp
+transformer_config:
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  d_ff: 0  # 0 → defaults to 4 * d_model
+
+# FactoredMLPNetwork (network_type=factored_mlp) COUNT encoding for the per-action
+# bid-count feature in the factored policy head:
+#   'linear'   -- count / total_cards (DEFAULT; byte-identical to the original head)
+#   'tailprob' -- q(c) = log P(total_count >= c), total_count ~ Binomial(total_cards,
+#                 1/num_digits). Game-size-INVARIANT (recomputed from the game shape,
+#                 parameter-free) -> transfers across count / num_players. Same
+#                 closed-form log-survival feature the transformer 'perdigit_tailprob'
+#                 head uses (q(c) matches bit-for-bit for the same config).
+factored_count_encoding: linear
+# The interleaved BR's OWN factored count encoding; null -> matches the frozen agent
+# (a coupled factored BR). Ignored by a decoupled mlp BR.
+br_factored_count_encoding: null
+
+# Interleaved best-response architecture (decoupled from the main agent).
+# When null, the interleaved BR uses the SAME arch as the main agent
+# (network_type / ppo_br_config.network_layers) — the legacy coupled behaviour,
+# byte-identical for mlp/factored runs. Set these to give the BR its own net,
+# e.g. a fast + honest plain MLP that exploits an lpt (transformer) main:
+#   network_type=lpt br_network_type=mlp br_layers=[512,512,512,256,256]
+# The frozen main agent still drives the BR's replay net (must match its arch).
+br_network_type: null
+br_layers: null
+
+rnad_config:
+  game_name: unused  # not used by JaxLiarsPokerRNaDSolver
+  batch_size: 512
+  trajectory_max: 40
+  policy_network_layers: [256, 256, 256, 64, 64, 64]
+  entropy_schedule_size: [2000]
+  eta_reward_transform: 0.4
+  # Weight each OPPONENT's regularization by 1/(num_players-1) so the REGULARIZED
+  # game stays zero-sum at 3+ players (with the old fixed weight of 1 the
+  # regularized returns summed to -(N-2)*sum(reg): 0 at N=2, NOT at N>=3, so the
+  # transform manufactured payoff whenever a player left its anchor). N=2 -> 1/1,
+  # i.e. BYTE-IDENTICAL for every 2-player run. false reproduces pre-fix 3p runs.
+  zero_sum_reg_scaling: true
+  # Explicit override for the opponent regularization weight (null = use the
+  # scaling above). 0.0 gives each player ONLY ITS OWN regularizer,
+  # R_k = r_k + reg_k -- the natural per-player KL-regularized game (what NashPG
+  # penalizes), with no cross-player accounting at all. Costs the zero-sum
+  # property of the regularized game, which is why the opponent terms exist.
+  opp_reg_coef: null
+  # learning_rate: 0.00005
+  warmup_steps: 0  # linear LR warmup steps (0 = constant LR; transformers like >0)
+  # Advantage estimator: "vtrace" (default RNaD critic) or "grpo"
+  # (critic-free group-relative Monte-Carlo advantage; keeps eta regularization).
+  # GRPO works with every network_type, including lpt (rope_digit transformer).
+  advantage_estimator: vtrace
+  grpo_group_size: 8   # only used when advantage_estimator=grpo; batch_size must be a multiple
+  grpo_importance_weight: true   # v2: 1/mu(a_t) inv_mu weight on the group advantage (no std-div)
+  # Cap on inv_mu = 1/mu(a_t) (0 = uncapped = current; >0 clips the variance bomb
+  # from rarely-sampled deeply-suppressed actions, e.g. 20).
+  grpo_inv_mu_cap: 0.0
+  # Per-action NeuRD trust-region floor from the heuristic teacher: when true, an
+  # action the teacher nearly-zeroes can be pushed below the scalar -beta floor
+  # (drains the high-jump pile), while teacher-liked actions keep -beta. Teacher =
+  # belief*exp(-nerd_teacher_lam*jump) bids + fixed nerd_teacher_challenge_prob.
+  nerd_teacher_floor: false
+  nerd_teacher_lam: 5.0
+  nerd_teacher_challenge_prob: 0.1
+  # Mask the NeuRD force-sum to ONLY the sampled action (sampled one-hot instead
+  # of the full legal mask), so the |A|-1 unsampled per-action regularizers don't
+  # swamp the single sampled action's return signal. false = current behavior.
+  nerd_mask_unsampled: false
+  # Fix the GRPO immediate-reg double-count: the acting player's own reg at each
+  # step is in both reg_return (the advantage) and eta_log_policy (per-action), so
+  # the current step's reg is counted twice on the sampled action (amplified by
+  # inv_mu). When true, subtract it from the broadcast advantage (matches v-trace,
+  # whose return carries only future reg). false (default) = current behavior.
+  grpo_dedup_reg: false
+  # Policy update rule:
+  #   neurd  — (default) NeuRD update. With advantage_estimator=grpo the group
+  #            advantage is fed into the unchanged NeuRD loss.
+  #   ppo    — PPO clipped surrogate on the taken action (ratio pi/mu replaces
+  #            inv_mu; the eta reward transform stays ON; the nerd_* /
+  #            grpo_importance_weight / grpo_inv_mu_cap / grpo_dedup_reg knobs are
+  #            ignored). Works with BOTH advantage_estimator values: grpo (the
+  #            critic-free group-relative regularized MC return) and vtrace (the
+  #            R-NaD critic's v-trace advantage of the taken action; critic loss
+  #            included).
+  #   nashpg — NashPG (arxiv 2510.18183): policy gradient with iteratively refined
+  #            regularization. The eta reward transform is dropped ENTIRELY
+  #            (eta_reward_transform is IGNORED) and the anchor moves into the loss
+  #            as an explicit KL penalty toward the magnet pi_reg (the alpha-mixed
+  #            params_prev/params_prev_, refreshed every entropy_schedule_size
+  #            steps — that refresh IS the "iterative refinement"):
+  #              loss = -PPO_clip(pi/mu, adv) - ent*H(pi) + mag*KL(pi || pi_reg)
+  #            Works with BOTH advantage_estimator values: vtrace (critic +
+  #            v-trace advantage; the analogue of the paper's GAE+critic PPO) and
+  #            grpo (critic-free group-relative MC advantage of the RAW return).
+  policy_update: neurd
+  ppo_clip_epsilon: 0.2   # PPO ratio clip (used when policy_update=ppo or nashpg)
+  # PPO knobs (only used when policy_update=ppo; nashpg has its own).
+  ppo_normalize_advantage: false  # standardize the advantage before the surrogate
+  ppo_ent_coef: 0.0               # entropy bonus (R-NaD's reward transform already has one)
+  # Entropy bonus for policy_update=neurd — the NeuRD counterpart of
+  # ppo_ent_coef, for the (update rule x entropy bonus) 2x2 ablation. Vanilla
+  # NeuRD has NO entropy term: what bounds its determinism is the nerd.beta
+  # logit trust region plus the all-legal-actions force. 0.0 = off = unchanged.
+  neurd_ent_coef: 0.0
+  # NeuRD trust-region width (nerd.beta); null keeps the default 2.0.
+  # Retained tail mass with all-but-one action on the floor is
+  # (n-1)/(exp(2*beta)+n-1), which GROWS with |A| at fixed beta. Hold it
+  # constant while scaling the action space with
+  #     beta_m = 2.0 + 0.5*ln((n_m-1)/(n_1-1))
+  nerd_beta: null
+  # NashPG knobs (only used when policy_update=nashpg).
+  nashpg_mag_coef: 0.2            # weight of KL(pi || pi_reg) — NashPG's reg strength
+  nashpg_mag_divergence: kl       # "kl" or "l2"
+  nashpg_ent_coef: 0.05           # entropy bonus weight
+  nashpg_normalize_advantage: true  # standardize the advantage before the surrogate
+
+ppo_br_config:
+  # Must match rnad_config.policy_network_layers so that main_agent.params_target
+  # is structurally compatible with the PPO agent's network.
+  network_layers: [256, 256, 256, 64, 64, 64]
+  batch_size: 512          # parallel environments per rollout
+  trajectory_max: 40       # steps per rollout; should be >= max game length
+  lr: 3.0e-4
+  clip_epsilon: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.01
+  gae_lambda: 0.95
+  gamma: 1.0               # undiscounted (finite game)
+  n_epochs: 4
+  minibatch_size: 256

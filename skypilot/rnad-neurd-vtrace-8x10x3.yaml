@@ -1,0 +1,45 @@
+name: rnad-neurd-vtrace-8x10x3
+
+# VANILLA R-NaD at 8x10x3: stock NeuRD update + v-trace critic + zero-sum
+# regularization (rnad_config.zero_sum_reg_scaling=true -> each opponent
+# weighted 1/(N-1) = 0.5, the accounting that keeps the regularized game
+# zero-sum at 3 players; commit b2db888).
+#
+# Differs from the zs-eta04 arm of the 8x10x3 sweep ONLY in policy_update
+# (that one was ppo and stayed BR-saturated to 1.04M before being killed), and
+# from the ORIGINAL collapsed 3p run in both the update rule and the accounting
+# fix. The question it answers: does vanilla R-NaD suffer the seat degeneracy
+# that PPO did at 3 players, or was that specific to the PPO update?
+#
+# READ PER-SEAT REWARDS (br/reward_p0/_p1/_p2), NOT br/agent_score: in the
+# 8x10x3 sweep the DEGENERATE arm posted the best mean score of all.
+#
+# eta_reward_transform=0.4 matches the RNaD-PPO runs it is the control for, so
+# policy_update is the ONLY difference on that axis.
+#
+# Cadence matches the other 8x10 runs (eval every 100k steps, ~10k BR hands per
+# eval, br_reinit_every=0, agent_score_window=3). CAVEAT inherited from those:
+# that BR budget is ~2.5x below this repo's floor for a trustworthy
+# br/agent_score, and on the 2p PPO run the interleaved BR needed ~1.1M steps
+# just to break even -- so the in-run curve largely measures the EXPLOITER's
+# training. Checkpoints land every 100k steps for the decoupled BR that produces
+# the real number.
+# Branch rnad-ppo-vtrace.
+workdir: .
+# cpus/memory floors are not (only) about headroom: vastlaunch picks the CHEAPEST
+# matching offer, deterministically, and the cheapest A100_SXM4 offer was a host
+# whose CPU does not expose AVX -- jaxlib refuses to import there
+# ("This version of jaxlib was built using AVX instructions"). Two identical
+# submits landed on it twice. These floors change the candidate set (and a host
+# with >=16 real cores is very unlikely to be missing AVX).
+resources: {accelerators: A100_SXM4:1, disk_size: 50, cpus: "16+", memory: "64+", reliability: 0.99}
+secrets: {AWS_ACCESS_KEY_ID: null, AWS_SECRET_ACCESS_KEY: null, AWS_ENDPOINT_URL: null, WANDB_API_KEY: null}
+setup: |
+  pip install uv
+  uv venv
+  # 300MB+ cuda wheels vs uv's 30s default timeout: one launch died here.
+  export UV_HTTP_TIMEOUT=300
+  uv pip install -r requirements.txt
+  uv pip install 'jax[cuda12]'
+run: |
+  WANDB_NAME=rnad-neurd-vtrace-8x10x3 uv run python src/train_jax.py num_digits=10 hand_length=8 num_players=3 network_type=factored_mlp history_encoding=compact 'rnad_config.policy_network_layers=[512,512,512,256,256]' 'ppo_br_config.network_layers=[512,512,512,256,256]' rnad_config.policy_update=neurd rnad_config.zero_sum_reg_scaling=true rnad_config.eta_reward_transform=0.4 rnad_config.advantage_estimator=vtrace rnad_config.batch_size=256 ppo_br_config.batch_size=256 br_network_type=mlp 'br_layers=[512,512,512,256,256]' ppo_br_config.lr=1e-4 ppo_br_config.ent_coef=0.03 ppo_br_config.n_epochs=2 rnad_config.warmup_steps=2000 br_state_ratio=0 num_phases=20000 rnad_steps_per_phase=100 eval_every_phases=1000 br_collect_per_phase=40 br_eval_episodes=4096 checkpoint_every_phases=1000 +agent_score_window=3 br_reinit_every=0 rnad_config.trajectory_max=100 ppo_br_config.trajectory_max=100 save_dir=s3://<your-bucket>/checkpoints/rnad-neurd-vtrace-8x10x3/

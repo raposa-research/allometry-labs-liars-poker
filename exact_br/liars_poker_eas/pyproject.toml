@@ -1,0 +1,14 @@
+[build-system]
+requires = ["scikit_build_core", "pybind11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "lpeas"
+version = "0.0.1"
+description = "Exact exploitability for 2-player Liar's Poker (OpenSpiel python_liars_poker rules)"
+requires-python = ">=3.9"
+dependencies = ["numpy"]
+
+[tool.scikit-build]
+wheel.packages = ["lpeas"]
+cmake.build-type = "Release"
